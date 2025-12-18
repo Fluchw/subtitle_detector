@@ -124,6 +124,10 @@ class Logger:
     def error(self, message: str):
         print(f"\n[{self._timestamp()}] [ERROR] ✗ {message}", file=sys.stderr)
     
+    def warning(self, message: str):
+        if self.verbose:
+            print(f"[{self._timestamp()}] [WARNING] ⚠ {message}")
+    
     def newline(self):
         if self.verbose:
             print()
@@ -201,7 +205,8 @@ class VideoOCR:
         scale_factor: float = 1.0,
         batch_size: int = 1,
         use_cache: bool = False,
-        cache_iou_threshold: float = 0.85
+        cache_iou_threshold: float = 0.85,
+        save_frames: bool = False
     ):
         """
         初始化 VideoOCR
@@ -222,6 +227,7 @@ class VideoOCR:
             batch_size: 批量处理帧数，>1时启用批量OCR，GPU下效果更明显，默认1
             use_cache: 是否启用结果缓存，相邻帧文字位置相似时复用结果跳过OCR
             cache_iou_threshold: 缓存IoU阈值(0-1)，框重叠度超过此值认为相同，默认0.85
+            save_frames: 是否保存标注后的每一帧图片，默认False不保存
         """
         self.box_style = box_style
         self.keep_audio = keep_audio
@@ -238,6 +244,7 @@ class VideoOCR:
         self.batch_size = batch_size
         self.use_cache = use_cache
         self.cache_iou_threshold = cache_iou_threshold
+        self.save_frames = save_frames
         
         self.logger = Logger(verbose)
         self.timer = Timer()
@@ -249,12 +256,16 @@ class VideoOCR:
             "total_detections": 0,
             "frames_processed": 0,
             "frames_skipped": 0,
-            "cache_hits": 0
+            "cache_hits": 0,
+            "frames_saved": 0
         }
         
         # 缓存相关
         self._last_boxes = None
         self._last_detections = None
+        
+        # 帧保存目录
+        self._frames_dir = None
         
         self._initialize()
     
@@ -285,6 +296,8 @@ class VideoOCR:
         self.logger.info(f"- 设备: {self.device_info.get('paddle_device', 'Unknown')}", indent=28)
         if self.skip_frames > 0:
             self.logger.info(f"- 跳帧: 每 {self.skip_frames + 1} 帧处理 1 帧", indent=28)
+        if self.save_frames:
+            self.logger.info(f"- 保存帧: 已启用", indent=28)
         self.logger.info(f"- 耗时: {self.timer.get_duration('模型初始化'):.2f}s", indent=28)
     
     def _get_device_info(self):
@@ -452,6 +465,25 @@ class VideoOCR:
                             color=(0, 255, 0), thickness=2)
         
         return result_frame
+    
+    def _save_frame(self, frame: np.ndarray, frame_id: int):
+        """
+        保存标注后的帧图片
+        
+        Args:
+            frame: 标注后的帧
+            frame_id: 帧ID
+        """
+        if not self.save_frames or self._frames_dir is None:
+            return
+        
+        # 生成文件名，使用零填充确保排序正确
+        filename = f"frame_{frame_id:08d}.jpg"
+        filepath = os.path.join(self._frames_dir, filename)
+        
+        # 保存图片
+        cv2.imwrite(filepath, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        self.stats["frames_saved"] += 1
     
     def _box_to_rect(self, box):
         """将4点框转换为矩形 (x_min, y_min, x_max, y_max)"""
@@ -702,6 +734,9 @@ class VideoOCR:
         # 绘制标注框
         result_frame = self._draw_box(frame, boxes)
         
+        # 保存帧图片
+        self._save_frame(result_frame, frame_id)
+        
         # 帧数据
         frame_data = {
             "frame_id": frame_id,
@@ -767,6 +802,10 @@ class VideoOCR:
                 self.stats["frames_ocr"] = self.stats.get("frames_ocr", 0) + 1
                 
                 result_frame = self._draw_box(orig_frame, boxes)
+                
+                # 保存帧图片
+                self._save_frame(result_frame, frame_id)
+                
                 frame_data = {
                     "frame_id": frame_id,
                     "timestamp": round(timestamp, 3),
@@ -811,6 +850,10 @@ class VideoOCR:
                 self.stats["frames_ocr"] = self.stats.get("frames_ocr", 0) + 1
                 
                 result_frame = self._draw_box(orig_frame, boxes)
+                
+                # 保存帧图片
+                self._save_frame(result_frame, frame_id)
+                
                 frame_data = {
                     "frame_id": frame_id,
                     "timestamp": round(timestamp, 3),
@@ -840,6 +883,7 @@ class VideoOCR:
             - 视频: {output_dir}/{输入文件名}_ocr_{时间戳}.mp4
             - JSON: {output_dir}/{输入文件名}_ocr_{时间戳}.json
             - 统计: {output_dir}/{输入文件名}_ocr_{时间戳}.txt
+            - 帧图片: {output_dir}/{输入文件名}_ocr_{时间戳}_frames/frame_XXXXXXXX.jpg
         """
         # 检查输入文件
         if not os.path.exists(input_path):
@@ -866,6 +910,12 @@ class VideoOCR:
         output_txt_path = os.path.join(output_dir, f"{input_basename}_ocr_{timestamp_str}.txt")
         self._output_txt_path = output_txt_path
         
+        # 帧图片保存目录
+        if self.save_frames:
+            self._frames_dir = os.path.join(output_dir, f"{input_basename}_ocr_{timestamp_str}_frames")
+            os.makedirs(self._frames_dir, exist_ok=True)
+            self.logger.info(f"帧图片将保存到: {self._frames_dir}")
+        
         # 获取视频信息
         self.logger.section("视频信息分析")
         self.timer.start("视频分析")
@@ -886,6 +936,7 @@ class VideoOCR:
         self.logger.section("处理设置")
         self.logger.info(f"- 标注框样式: {'红色空心框' if self.box_style == 'red_hollow' else '绿色半透明填充'}")
         self.logger.info(f"- 保留音频: {'是' if self.keep_audio and self.video_info['has_audio'] else '否'}")
+        self.logger.info(f"- 保存帧图片: {'是' if self.save_frames else '否'}")
         self.logger.info(f"- 解码: {self.device_info['ffmpeg_decode']}")
         self.logger.info(f"- OCR: {self.device_info['paddle_device']}")
         self.logger.info(f"- 编码: {self.device_info['ffmpeg_encode']}")
@@ -978,6 +1029,8 @@ class VideoOCR:
                 mode_info.append(f"批量{self.batch_size}")
             else:
                 mode_info.append(f"批量{self.batch_size}(PaddleOCR不支持,实际逐帧)")
+        if self.save_frames:
+            mode_info.append("保存帧")
         
         self.logger.info(f"开始处理，预计 {total_frames} 帧 ({', '.join(mode_info)})...")
         
@@ -1056,6 +1109,10 @@ class VideoOCR:
                 else:
                     # 跳过OCR，使用上一帧的检测结果
                     result_frame = self._draw_box(frame, last_boxes)
+                    
+                    # 保存跳过的帧图片（如果启用）
+                    self._save_frame(result_frame, frame_id)
+                    
                     frame_data = {
                         "frame_id": frame_id,
                         "timestamp": round(timestamp, 3),
@@ -1105,7 +1162,8 @@ class VideoOCR:
         settings = {
             "box_style": self.box_style,
             "keep_audio": self.keep_audio,
-            "use_paddle_ocr": self.use_paddle_ocr
+            "use_paddle_ocr": self.use_paddle_ocr,
+            "save_frames": self.save_frames
         }
         
         if self.use_paddle_ocr:
@@ -1131,6 +1189,10 @@ class VideoOCR:
             },
             "frames": frames_data
         }
+        
+        # 如果保存了帧图片，记录目录路径
+        if self.save_frames and self._frames_dir:
+            result["frames_dir"] = self._frames_dir
         
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
@@ -1158,6 +1220,7 @@ class VideoOCR:
         log_and_save(f"  ├─ 缩放因子: {self.scale_factor}")
         log_and_save(f"  ├─ 批量大小: {self.batch_size}")
         log_and_save(f"  ├─ 结果缓存: {'启用' if self.use_cache else '禁用'}")
+        log_and_save(f"  ├─ 保存帧图片: {'是' if self.save_frames else '否'}")
         if self.use_cache:
             log_and_save(f"  └─ 缓存IoU阈值: {self.cache_iou_threshold}")
         else:
@@ -1203,7 +1266,24 @@ class VideoOCR:
         
         txt_path = getattr(self, '_output_txt_path', None)
         if txt_path:
-            log_and_save(f"  └─ 统计: {txt_path}")
+            log_and_save(f"  ├─ 统计: {txt_path}")
+        
+        # 帧图片目录信息
+        if self.save_frames and self._frames_dir:
+            frames_saved = self.stats.get("frames_saved", 0)
+            if os.path.exists(self._frames_dir):
+                # 计算目录大小
+                total_size = 0
+                for f in os.listdir(self._frames_dir):
+                    fp = os.path.join(self._frames_dir, f)
+                    if os.path.isfile(fp):
+                        total_size += os.path.getsize(fp)
+                size_mb = total_size / (1024 * 1024)
+                log_and_save(f"  ├─ 帧图片: {self._frames_dir} ({frames_saved} 张, {size_mb:.1f} MB)")
+            else:
+                log_and_save(f"  ├─ 帧图片: {self._frames_dir} ({frames_saved} 张)")
+        
+        log_and_save(f"  └─ (完成)")
         
         # 检测统计
         log_and_save("\n检测统计:")
@@ -1223,6 +1303,9 @@ class VideoOCR:
             log_and_save(f"  ├─ 缓存命中: {cache_hits} 次")
             cache_ratio = cache_hits / ocr_frames * 100 if ocr_frames > 0 else 0
             log_and_save(f"  ├─ 缓存命中率: {cache_ratio:.1f}%")
+        
+        if self.save_frames:
+            log_and_save(f"  ├─ 保存帧数: {self.stats.get('frames_saved', 0)} 张")
         
         log_and_save(f"  ├─ 检测文字区域: {self.stats['total_detections']} 个")
         avg = self.stats['total_detections'] / self.stats['frames_processed'] if self.stats['frames_processed'] > 0 else 0
@@ -1329,6 +1412,11 @@ def main():
         default=0.85,
         help="缓存IoU阈值(0-1)，框重叠度超过此值认为相同，默认0.85"
     )
+    parser.add_argument(
+        "--save-frames",
+        action="store_true",
+        help="保存标注后的每一帧图片，方便检查（默认不保存）"
+    )
     
     args = parser.parse_args()
     
@@ -1347,7 +1435,8 @@ def main():
         scale_factor=args.scale,
         batch_size=args.batch,
         use_cache=args.cache,
-        cache_iou_threshold=args.cache_iou
+        cache_iou_threshold=args.cache_iou,
+        save_frames=args.save_frames
     )
     
     # 处理视频（自动生成输出路径，或使用指定路径）
