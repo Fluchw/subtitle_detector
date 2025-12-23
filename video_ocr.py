@@ -19,7 +19,7 @@ class VideoOCR:
 
     def __init__(
         self,
-        box_style: Literal["red_hollow", "green_fill"] = "red_hollow",
+        box_style: Literal["red_hollow", "green_fill", "mask"] = "red_hollow",
         keep_audio: bool = False,
         verbose: bool = True,
         use_paddle_ocr: bool = True,
@@ -41,7 +41,10 @@ class VideoOCR:
         初始化 VideoOCR
 
         Args:
-            box_style: 标注框样式 - "red_hollow"(红色空心框) 或 "green_fill"(绿色半透明填充)
+            box_style: 标注框样式
+                - "red_hollow": 红色空心框
+                - "green_fill": 绿色半透明填充
+                - "mask": 黑白遮罩（字幕区域白色，其他区域黑色）
             keep_audio: 是否保留原视频音频
             verbose: 是否输出详细日志
             use_paddle_ocr: True使用PaddleOCR(推荐), False使用TextDetection
@@ -206,7 +209,16 @@ class VideoOCR:
     def _print_process_settings(self, output_dir: str):
         """打印处理设置"""
         self.logger.section("处理设置")
-        self.logger.info(f"- 标注框样式: {'红色空心框' if self.box_style == 'red_hollow' else '绿色半透明填充'}")
+
+        # 标注框样式描述
+        style_map = {
+            "red_hollow": "红色空心框",
+            "green_fill": "绿色半透明填充",
+            "mask": "黑白遮罩（字幕白色，背景黑色）"
+        }
+        style_desc = style_map.get(self.box_style, self.box_style)
+
+        self.logger.info(f"- 标注框样式: {style_desc}")
         self.logger.info(f"- 图像增强: {'启用 (' + self.enhance_mode + ')' if self.enhance_mode else '禁用'}")
         self.logger.info(f"- 保存帧图片: {'是' if self.save_frames else '否'}")
         self.logger.info(f"- 输出目录: {output_dir}")
@@ -493,9 +505,9 @@ def main():
     parser.add_argument("-j", "--json", help="输出JSON路径", default=None)
     parser.add_argument(
         "-s", "--style",
-        choices=["red_hollow", "green_fill"],
+        choices=["red_hollow", "green_fill", "mask"],
         default="red_hollow",
-        help="标注框样式"
+        help="标注框样式: red_hollow(红色空心框) / green_fill(绿色半透明填充) / mask(黑白遮罩)"
     )
     parser.add_argument("-a", "--audio", action="store_true", help="保留原视频音频")
     parser.add_argument("--text-detection", action="store_true", help="使用TextDetection模式")
