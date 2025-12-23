@@ -82,7 +82,10 @@ class OCREngine:
         detect_only: bool = False,
         confidence_threshold: float = 0.5,
         scale_factor: float = 1.0,
-        enhance_mode: Optional[Literal["clahe", "binary", "both"]] = None
+        enhance_mode: Optional[Literal["clahe", "binary", "both"]] = None,
+        use_orientation_classify: bool = False,
+        use_textline_orientation: bool = False,
+        use_doc_unwarping: bool = False
     ):
         """
         初始化 OCR 引擎
@@ -95,6 +98,9 @@ class OCREngine:
             confidence_threshold: 置信度阈值(0-1)
             scale_factor: 缩放因子(0-1)
             enhance_mode: 图像预处理模式
+            use_orientation_classify: 启用文档方向分类（检测整体旋转0°/90°/180°/270°）
+            use_textline_orientation: 启用文本行方向检测（检测倾斜文字）
+            use_doc_unwarping: 启用文档矫正（处理弯曲/透视变形）
         """
         self.use_paddle_ocr = use_paddle_ocr
         self.lang = lang
@@ -103,6 +109,9 @@ class OCREngine:
         self.confidence_threshold = confidence_threshold
         self.scale_factor = scale_factor
         self.enhance_mode = enhance_mode
+        self.use_orientation_classify = use_orientation_classify
+        self.use_textline_orientation = use_textline_orientation
+        self.use_doc_unwarping = use_doc_unwarping
 
         self.model = None
         self.enhancer = ImageEnhancer()
@@ -126,16 +135,16 @@ class OCREngine:
                     lang=self.lang,
                     text_detection_model_name="PP-OCRv5_mobile_det",
                     text_recognition_model_name="PP-OCRv5_mobile_rec",
-                    use_doc_orientation_classify=False,
-                    use_doc_unwarping=False,
-                    use_textline_orientation=False
+                    use_doc_orientation_classify=self.use_orientation_classify,
+                    use_doc_unwarping=self.use_doc_unwarping,
+                    use_textline_orientation=self.use_textline_orientation
                 )
             else:
                 self.model = PaddleOCR(
                     lang=self.lang,
-                    use_doc_orientation_classify=False,
-                    use_doc_unwarping=False,
-                    use_textline_orientation=False
+                    use_doc_orientation_classify=self.use_orientation_classify,
+                    use_doc_unwarping=self.use_doc_unwarping,
+                    use_textline_orientation=self.use_textline_orientation
                 )
         else:
             from paddleocr import TextDetection
@@ -268,6 +277,14 @@ class OCREngine:
             return f"仅检测 TextDetection {model_type}"
         elif self.use_paddle_ocr:
             model_type = "Mobile(轻量)" if self.use_lightweight else "Server(精准)"
-            return f"PaddleOCR 检测+识别 {model_type} (lang={self.lang})"
+            orientation_info = []
+            if self.use_orientation_classify:
+                orientation_info.append("方向分类")
+            if self.use_textline_orientation:
+                orientation_info.append("文本行方向")
+            if self.use_doc_unwarping:
+                orientation_info.append("文档矫正")
+            orientation_str = f" [{', '.join(orientation_info)}]" if orientation_info else ""
+            return f"PaddleOCR 检测+识别 {model_type} (lang={self.lang}){orientation_str}"
         else:
             return "TextDetection"

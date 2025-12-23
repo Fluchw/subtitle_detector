@@ -13,3 +13,4 @@ output/
 .venv
 .trunk
 .claude
+*.mp4

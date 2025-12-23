@@ -35,7 +35,10 @@ class VideoOCR:
         use_cache: bool = False,
         cache_iou_threshold: float = 0.85,
         save_frames: bool = False,
-        enhance_mode: Optional[Literal["clahe", "binary", "both"]] = None
+        enhance_mode: Optional[Literal["clahe", "binary", "both"]] = None,
+        use_orientation_classify: bool = False,
+        use_textline_orientation: bool = False,
+        use_doc_unwarping: bool = False
     ):
         """
         初始化 VideoOCR
@@ -49,7 +52,7 @@ class VideoOCR:
             verbose: 是否输出详细日志
             use_paddle_ocr: True使用PaddleOCR(推荐), False使用TextDetection
             lang: PaddleOCR语言，默认"ch"(中英文)
-            use_angle_cls: 是否使用文本行方向分类器（会降低速度）
+            use_angle_cls: 是否使用文本行方向分类器（已废弃，请用use_textline_orientation）
             model_name: TextDetection模型名称(仅use_paddle_ocr=False时有效)
             use_lightweight: 使用轻量级Mobile模型(True)还是Server模型(False)
             skip_frames: 跳帧处理，0表示处理每一帧，N表示每N+1帧处理1帧
@@ -61,6 +64,9 @@ class VideoOCR:
             cache_iou_threshold: 缓存IoU阈值（保留参数，暂未使用）
             save_frames: 是否保存标注后的每一帧图片
             enhance_mode: 图像预处理模式，None禁用，可选 "clahe"(对比度增强) / "binary"(二值化) / "both"(两者结合)
+            use_orientation_classify: 启用文档方向分类（检测整体旋转0°/90°/180°/270°）
+            use_textline_orientation: 启用文本行方向检测（检测倾斜文字）
+            use_doc_unwarping: 启用文档矫正（处理弯曲/透视变形）
         """
         self.box_style = box_style
         self.keep_audio = keep_audio
@@ -68,6 +74,9 @@ class VideoOCR:
         self.skip_frames = skip_frames
         self.save_frames = save_frames
         self.enhance_mode = enhance_mode
+        self.use_orientation_classify = use_orientation_classify
+        self.use_textline_orientation = use_textline_orientation
+        self.use_doc_unwarping = use_doc_unwarping
 
         # 未使用的参数（保留用于向后兼容）
         self.batch_size = batch_size
@@ -88,7 +97,10 @@ class VideoOCR:
             detect_only=detect_only,
             confidence_threshold=confidence_threshold,
             scale_factor=scale_factor,
-            enhance_mode=enhance_mode
+            enhance_mode=enhance_mode,
+            use_orientation_classify=use_orientation_classify,
+            use_textline_orientation=use_textline_orientation,
+            use_doc_unwarping=use_doc_unwarping
         )
         self.renderer = FrameRenderer(box_style=box_style)
         self.frame_saver = None  # 稍后初始化
@@ -220,6 +232,20 @@ class VideoOCR:
 
         self.logger.info(f"- 标注框样式: {style_desc}")
         self.logger.info(f"- 图像增强: {'启用 (' + self.enhance_mode + ')' if self.enhance_mode else '禁用'}")
+        
+        # 方向检测设置
+        orientation_info = []
+        if self.use_orientation_classify:
+            orientation_info.append("方向分类")
+        if self.use_textline_orientation:
+            orientation_info.append("文本行方向")
+        if self.use_doc_unwarping:
+            orientation_info.append("文档矫正")
+        if orientation_info:
+            self.logger.info(f"- 方向检测: {', '.join(orientation_info)}")
+        else:
+            self.logger.info(f"- 方向检测: 禁用")
+        
         self.logger.info(f"- 保存帧图片: {'是' if self.save_frames else '否'}")
         self.logger.info(f"- 输出目录: {output_dir}")
 
@@ -365,7 +391,10 @@ class VideoOCR:
             "keep_audio": self.keep_audio,
             "use_paddle_ocr": self.ocr_engine.use_paddle_ocr,
             "save_frames": self.save_frames,
-            "enhance_mode": self.enhance_mode
+            "enhance_mode": self.enhance_mode,
+            "use_orientation_classify": self.use_orientation_classify,
+            "use_textline_orientation": self.use_textline_orientation,
+            "use_doc_unwarping": self.use_doc_unwarping
         }
 
         if self.ocr_engine.use_paddle_ocr:
@@ -411,6 +440,18 @@ class VideoOCR:
         log_and_save(f"  ├─ 置信度阈值: {self.ocr_engine.confidence_threshold}")
         log_and_save(f"  ├─ 缩放因子: {self.ocr_engine.scale_factor}")
         log_and_save(f"  ├─ 图像增强: {'启用 (' + self.enhance_mode + ')' if self.enhance_mode else '禁用'}")
+        
+        # 方向检测设置
+        orientation_info = []
+        if self.use_orientation_classify:
+            orientation_info.append("方向分类")
+        if self.use_textline_orientation:
+            orientation_info.append("文本行方向")
+        if self.use_doc_unwarping:
+            orientation_info.append("文档矫正")
+        orientation_str = ', '.join(orientation_info) if orientation_info else '禁用'
+        log_and_save(f"  ├─ 方向检测: {orientation_str}")
+        
         log_and_save(f"  ├─ 保存帧图片: {'是' if self.save_frames else '否'}")
         log_and_save(f"  └─ 保留音频: {'是' if self.keep_audio else '否'}")
 
@@ -530,6 +571,13 @@ def main():
         default=None,
         help="图像预处理模式: clahe(对比度增强) / binary(二值化) / both(两者结合)，不指定则禁用"
     )
+    # 新增方向检测参数
+    parser.add_argument("--orientation-classify", action="store_true", 
+                        help="启用文档方向分类（检测整体旋转0°/90°/180°/270°）")
+    parser.add_argument("--textline-orientation", action="store_true", 
+                        help="启用文本行方向检测（检测倾斜文字）")
+    parser.add_argument("--doc-unwarping", action="store_true", 
+                        help="启用文档矫正（处理弯曲/透视变形）")
 
     args = parser.parse_args()
 
@@ -549,7 +597,10 @@ def main():
         use_cache=args.cache,
         cache_iou_threshold=args.cache_iou,
         save_frames=args.save_frames,
-        enhance_mode=args.enhance_mode
+        enhance_mode=args.enhance_mode,
+        use_orientation_classify=args.orientation_classify,
+        use_textline_orientation=args.textline_orientation,
+        use_doc_unwarping=args.doc_unwarping
     )
 
     ocr.process(
