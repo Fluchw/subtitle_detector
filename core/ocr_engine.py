@@ -17,16 +17,31 @@ logging.getLogger("paddleocr").setLevel(logging.WARNING)
 
 
 class ImageEnhancer:
-    """图像增强器"""
+    """图像增强器 - 优化版，支持多种预处理模式以提升文字检测准确率"""
 
-    @staticmethod
-    def enhance(frame: np.ndarray, mode: Optional[Literal["clahe", "binary", "both"]]) -> np.ndarray:
+    # 复用 CLAHE 对象，避免每帧重复创建
+    _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    # 高对比度 CLAHE，用于 sharpen 模式
+    _clahe_strong = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+
+    def __init__(self):
+        """初始化增强器"""
+        pass
+
+    def enhance(self, frame: np.ndarray, mode: Optional[str]) -> np.ndarray:
         """
         图像预处理增强
 
         Args:
             frame: 原始帧 (BGR)
             mode: 增强模式
+                - None: 不处理
+                - "clahe": CLAHE 对比度增强（通用场景）
+                - "binary": 自适应二值化（高对比度字幕）
+                - "both": CLAHE + 二值化
+                - "sharpen": CLAHE + 锐化（推荐，提升检测准确率）
+                - "denoise": 去噪 + CLAHE（视频压缩噪点多时使用）
+                - "denoise_sharpen": 去噪 + CLAHE + 锐化（综合处理）
 
         Returns:
             增强后的帧 (BGR)
@@ -35,40 +50,86 @@ class ImageEnhancer:
             return frame
 
         if mode == "clahe":
-            return ImageEnhancer._apply_clahe(frame)
+            return self._apply_clahe(frame)
         elif mode == "binary":
-            return ImageEnhancer._apply_binary(frame)
+            return self._apply_binary(frame)
         elif mode == "both":
-            enhanced = ImageEnhancer._apply_clahe(frame)
-            return ImageEnhancer._apply_binary(enhanced)
+            return self._apply_clahe_binary(frame)
+        elif mode == "sharpen":
+            return self._apply_sharpen(frame)
+        elif mode == "denoise":
+            return self._apply_denoise(frame)
+        elif mode == "denoise_sharpen":
+            return self._apply_denoise_sharpen(frame)
         else:
             return frame
 
-    @staticmethod
-    def _apply_clahe(frame: np.ndarray) -> np.ndarray:
+    def _apply_clahe(self, frame: np.ndarray) -> np.ndarray:
         """应用 CLAHE 对比度增强"""
         lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
-
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        l_enhanced = clahe.apply(l)
-
+        l_enhanced = ImageEnhancer._clahe.apply(l)
         lab_enhanced = cv2.merge([l_enhanced, a, b])
         return cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
 
-    @staticmethod
-    def _apply_binary(frame: np.ndarray) -> np.ndarray:
+    def _apply_binary(self, frame: np.ndarray) -> np.ndarray:
         """应用自适应二值化（保持3通道输出）"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
         binary = cv2.adaptiveThreshold(
             gray, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY,
             11, 2
         )
-
         return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+
+    def _apply_clahe_binary(self, frame: np.ndarray) -> np.ndarray:
+        """CLAHE + 二值化（优化：减少颜色空间转换）"""
+        # BGR -> LAB，提取 L 通道
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        l, _, _ = cv2.split(lab)
+        # CLAHE 增强 L 通道
+        l_enhanced = ImageEnhancer._clahe.apply(l)
+        # 直接对增强后的 L 通道二值化
+        binary = cv2.adaptiveThreshold(
+            l_enhanced, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            11, 2
+        )
+        return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+
+    def _apply_sharpen(self, frame: np.ndarray) -> np.ndarray:
+        """CLAHE + 边缘锐化（推荐用于提升检测准确率）"""
+        # CLAHE 增强对比度
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        l_enhanced = ImageEnhancer._clahe_strong.apply(l)
+        lab_enhanced = cv2.merge([l_enhanced, a, b])
+        enhanced = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
+
+        # 锐化核 - 增强边缘
+        sharpen_kernel = np.array([
+            [0, -1, 0],
+            [-1, 5, -1],
+            [0, -1, 0]
+        ], dtype=np.float32)
+        sharpened = cv2.filter2D(enhanced, -1, sharpen_kernel)
+        return sharpened
+
+    def _apply_denoise(self, frame: np.ndarray) -> np.ndarray:
+        """去噪 + CLAHE（适合视频压缩噪点多的情况）"""
+        # 快速去噪（比 fastNlMeansDenoisingColored 更快）
+        denoised = cv2.bilateralFilter(frame, d=5, sigmaColor=50, sigmaSpace=50)
+        # CLAHE
+        return self._apply_clahe(denoised)
+
+    def _apply_denoise_sharpen(self, frame: np.ndarray) -> np.ndarray:
+        """去噪 + CLAHE + 锐化（综合处理）"""
+        # 去噪
+        denoised = cv2.bilateralFilter(frame, d=5, sigmaColor=50, sigmaSpace=50)
+        # CLAHE + 锐化
+        return self._apply_sharpen(denoised)
 
 
 class OCREngine:
@@ -82,7 +143,7 @@ class OCREngine:
         detect_only: bool = False,
         confidence_threshold: float = 0.5,
         scale_factor: float = 1.0,
-        enhance_mode: Optional[Literal["clahe", "binary", "both"]] = None,
+        enhance_mode: Optional[Literal["clahe", "binary", "both", "sharpen", "denoise", "denoise_sharpen"]] = None,
         use_orientation_classify: bool = False,
         use_textline_orientation: bool = False,
         use_doc_unwarping: bool = False

@@ -35,7 +35,7 @@ class VideoOCR:
         use_cache: bool = False,
         cache_iou_threshold: float = 0.85,
         save_frames: bool = False,
-        enhance_mode: Optional[Literal["clahe", "binary", "both"]] = None,
+        enhance_mode: Optional[Literal["clahe", "binary", "both", "sharpen", "denoise", "denoise_sharpen"]] = None,
         use_orientation_classify: bool = False,
         use_textline_orientation: bool = False,
         use_doc_unwarping: bool = False
@@ -63,7 +63,13 @@ class VideoOCR:
             use_cache: 是否启用结果缓存（保留参数，暂未使用）
             cache_iou_threshold: 缓存IoU阈值（保留参数，暂未使用）
             save_frames: 是否保存标注后的每一帧图片
-            enhance_mode: 图像预处理模式，None禁用，可选 "clahe"(对比度增强) / "binary"(二值化) / "both"(两者结合)
+            enhance_mode: 图像预处理模式，None禁用，可选:
+                - "clahe": 对比度增强（通用场景）
+                - "binary": 二值化（高对比度字幕）
+                - "both": CLAHE + 二值化
+                - "sharpen": CLAHE + 锐化（推荐，提升检测准确率）
+                - "denoise": 去噪 + CLAHE（视频噪点多时使用）
+                - "denoise_sharpen": 去噪 + CLAHE + 锐化（综合处理）
             use_orientation_classify: 启用文档方向分类（检测整体旋转0°/90°/180°/270°）
             use_textline_orientation: 启用文本行方向检测（检测倾斜文字）
             use_doc_unwarping: 启用文档矫正（处理弯曲/透视变形）
@@ -567,9 +573,9 @@ def main():
     parser.add_argument("--save-frames", action="store_true", help="保存标注后的每一帧图片")
     parser.add_argument(
         "--enhance-mode",
-        choices=["clahe", "binary", "both"],
+        choices=["clahe", "binary", "both", "sharpen", "denoise", "denoise_sharpen"],
         default=None,
-        help="图像预处理模式: clahe(对比度增强) / binary(二值化) / both(两者结合)，不指定则禁用"
+        help="图像预处理模式: clahe(对比度增强) / binary(二值化) / both(两者结合) / sharpen(锐化,推荐) / denoise(去噪) / denoise_sharpen(去噪+锐化)"
     )
     # 新增方向检测参数
     parser.add_argument("--orientation-classify", action="store_true", 
