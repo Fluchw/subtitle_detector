@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# core/ocr_engine.py
 """
 OCR 引擎模块 - 负责文字检测和识别
 """
@@ -211,7 +212,7 @@ class OCREngine:
             from paddleocr import TextDetection
             self.model = TextDetection(model_name="PP-OCRv5_server_det")
 
-    def process_frame(self, frame: np.ndarray) -> Tuple[List, List]:
+    def process_frame(self, frame: np.ndarray) -> Tuple[List, List, float]:
         """
         对单帧进行OCR处理
 
@@ -219,10 +220,14 @@ class OCREngine:
             frame: 输入帧 (BGR)
 
         Returns:
-            (boxes, detections)
+            (boxes, detections, preprocess_time)
             boxes: 文字框坐标列表
             detections: 检测结果列表 [{"bbox": [...], "text": "...", "confidence": 0.9}, ...]
+            preprocess_time: 图像预处理耗时（秒）
         """
+        import time
+        preprocess_time = 0.0
+        
         # 缩放处理
         if self.scale_factor < 1.0:
             h, w = frame.shape[:2]
@@ -232,8 +237,13 @@ class OCREngine:
         else:
             process_frame = frame
 
-        # 图像预处理增强
-        process_frame = self.enhancer.enhance(process_frame, self.enhance_mode)
+        # 图像预处理增强（计时）
+        if self.enhance_mode:
+            preprocess_start = time.time()
+            process_frame = self.enhancer.enhance(process_frame, self.enhance_mode)
+            preprocess_time = time.time() - preprocess_start
+        else:
+            process_frame = self.enhancer.enhance(process_frame, self.enhance_mode)
 
         boxes = []
         detections = []
@@ -243,7 +253,7 @@ class OCREngine:
         else:
             boxes, detections = self._process_with_text_detection(process_frame)
 
-        return boxes, detections
+        return boxes, detections, preprocess_time
 
     def _process_with_paddleocr(self, frame: np.ndarray) -> Tuple[List, List]:
         """使用 PaddleOCR 处理"""

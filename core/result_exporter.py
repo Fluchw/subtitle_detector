@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# core/result_exporter.py
 """
 结果导出模块 - 负责导出JSON和统计信息
 """
@@ -18,7 +19,8 @@ class ResultExporter:
         settings: Dict,
         device_info: Dict,
         frames_data: List[Dict],
-        frames_dir: str = None
+        frames_dir: str = None,
+        masks_dir: str = None
     ):
         """
         导出JSON结果文件
@@ -30,6 +32,7 @@ class ResultExporter:
             device_info: 设备信息
             frames_data: 每帧的检测数据
             frames_dir: 帧图片目录（可选）
+            masks_dir: mask图片目录（可选）
         """
         result = {
             "video_info": video_info,
@@ -40,6 +43,9 @@ class ResultExporter:
 
         if frames_dir:
             result["frames_dir"] = frames_dir
+        
+        if masks_dir:
+            result["masks_dir"] = masks_dir
 
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# core/video_processor.py
 """
 视频处理模块 - 负责视频编解码、帧提取等
 """

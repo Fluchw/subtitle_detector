@@ -49,4 +49,4 @@ ocr = VideoOCR(
 #     use_cache=False,               # 结果缓存: 相邻帧相似时复用结果
 # )
 # 处理视频
-ocr.process(input_path="./t.mp4",)
+ocr.process(input_path="./zm_s1280.mp4",)

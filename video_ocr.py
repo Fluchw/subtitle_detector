@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# video_ocr.py
 """
 VideoOCR v2 - 视频文字检测工具（重构版）
+支持双输出：标注视频 + mask视频
 """
 
 import os
@@ -45,9 +47,9 @@ class VideoOCR:
 
         Args:
             box_style: 标注框样式
-                - "red_hollow": 红色空心框
-                - "green_fill": 绿色半透明填充
-                - "mask": 黑白遮罩（字幕区域白色，其他区域黑色）
+                - "red_hollow": 红色空心框（同时生成 mask 视频）
+                - "green_fill": 绿色半透明填充（同时生成 mask 视频）
+                - "mask": 仅输出黑白遮罩视频（字幕区域白色，其他区域黑色）
             keep_audio: 是否保留原视频音频
             verbose: 是否输出详细日志
             use_paddle_ocr: True使用PaddleOCR(推荐), False使用TextDetection
@@ -122,6 +124,7 @@ class VideoOCR:
             "frames_skipped": 0,
             "cache_hits": 0,
             "frames_saved": 0,
+            "masks_saved": 0,
             "frame_save_time": 0.0,
             "preprocess_time": 0.0
         }
@@ -129,6 +132,8 @@ class VideoOCR:
         # 输出路径
         self._output_txt_path = None
         self._frames_dir = None
+        self._masks_dir = None
+        self._output_mask_video_path = None
 
         self._initialize()
 
@@ -170,8 +175,19 @@ class VideoOCR:
 
         os.makedirs(output_dir, exist_ok=True)
 
+        # 生成输出路径
         if output_video_path is None:
             output_video_path = os.path.join(output_dir, f"{input_basename}_ocr_{timestamp_str}.mp4")
+        
+        # 如果不是纯 mask 模式，额外生成 mask 视频路径
+        if self.box_style != "mask":
+            # 从输出视频路径生成 mask 视频路径
+            video_dir = os.path.dirname(output_video_path) or output_dir
+            video_name = os.path.splitext(os.path.basename(output_video_path))[0]
+            self._output_mask_video_path = os.path.join(video_dir, f"{video_name}_mask.mp4")
+        else:
+            self._output_mask_video_path = None
+        
         if output_json_path is None:
             output_json_path = os.path.join(output_dir, f"{input_basename}_ocr_{timestamp_str}.json")
 
@@ -181,8 +197,14 @@ class VideoOCR:
         # 初始化帧保存器
         if self.save_frames:
             self._frames_dir = os.path.join(output_dir, f"{input_basename}_ocr_{timestamp_str}_frames")
-            self.frame_saver = FrameSaver(output_dir=self._frames_dir)
+            # 如果不是纯 mask 模式，额外保存 mask 到子目录
+            save_mask = (self.box_style != "mask")
+            self.frame_saver = FrameSaver(output_dir=self._frames_dir, save_mask=save_mask)
+            if save_mask:
+                self._masks_dir = os.path.join(self._frames_dir, "masks")
             self.logger.info(f"帧图片将保存到: {self._frames_dir}")
+            if save_mask:
+                self.logger.info(f"Mask图片将保存到: {self._masks_dir}")
 
         # 获取视频信息
         self.logger.section("视频信息分析")
@@ -230,9 +252,9 @@ class VideoOCR:
 
         # 标注框样式描述
         style_map = {
-            "red_hollow": "红色空心框",
-            "green_fill": "绿色半透明填充",
-            "mask": "黑白遮罩（字幕白色，背景黑色）"
+            "red_hollow": "红色空心框 + Mask视频",
+            "green_fill": "绿色半透明填充 + Mask视频",
+            "mask": "仅黑白遮罩视频（字幕白色，背景黑色）"
         }
         style_desc = style_map.get(self.box_style, self.box_style)
 
@@ -286,6 +308,18 @@ class VideoOCR:
             self.keep_audio and self.video_info.has_audio,
             input_path
         )
+        
+        # 如果需要额外输出 mask 视频，创建第二个写入进程
+        mask_write_process = None
+        if self._output_mask_video_path:
+            mask_write_process = self.video_processor.create_writer(
+                self._output_mask_video_path,
+                width,
+                height,
+                fps,
+                False,  # mask 视频不需要音频
+                input_path
+            )
 
         frames_data = []
         frame_id = 0
@@ -294,7 +328,7 @@ class VideoOCR:
             total_frames = int(fps * 60)
 
         process_start_time = time.time()
-        preprocess_start_time = 0
+        total_preprocess_time = 0.0  # 累计图像预处理时间
 
         last_boxes = []
         last_detections = []
@@ -311,10 +345,9 @@ class VideoOCR:
                 should_process = (self.skip_frames == 0) or (frame_id % (self.skip_frames + 1) == 0)
 
                 if should_process:
-                    # OCR处理
-                    preprocess_start = time.time()
-                    boxes, detections = self.ocr_engine.process_frame(frame)
-                    preprocess_start_time += time.time() - preprocess_start
+                    # OCR处理（返回预处理耗时）
+                    boxes, detections, preprocess_time = self.ocr_engine.process_frame(frame)
+                    total_preprocess_time += preprocess_time
 
                     last_boxes = boxes
                     last_detections = detections
@@ -338,17 +371,21 @@ class VideoOCR:
                         "skipped": True
                     }
 
-                # 绘制标注框
-                result_frame = self.renderer.draw_boxes(frame, boxes)
+                # 绘制标注框（返回标注帧和 mask）
+                result_frame, mask_frame = self.renderer.draw_boxes(frame, boxes)
 
-                # 保存帧图片
+                # 保存帧图片和 mask
                 if self.frame_saver:
                     save_start = time.time()
-                    self.frame_saver.save_frame(result_frame, frame_id)
+                    self.frame_saver.save_frame(result_frame, frame_id, mask=mask_frame)
                     self.stats["frame_save_time"] += time.time() - save_start
 
-                # 写入视频
+                # 写入主视频
                 self.video_processor.write_frame(write_process, result_frame)
+                
+                # 写入 mask 视频（如果需要）
+                if mask_write_process and mask_frame is not None:
+                    self.video_processor.write_frame(mask_write_process, mask_frame)
 
                 frames_data.append(frame_data)
                 frame_id += 1
@@ -362,8 +399,19 @@ class VideoOCR:
             read_process.wait()
             write_process.stdin.close()
             write_process.wait()
+            
+            # 关闭 mask 视频写入进程
+            if mask_write_process:
+                mask_write_process.stdin.close()
+                mask_write_process.wait()
 
-        self.stats["preprocess_time"] = preprocess_start_time
+        self.stats["preprocess_time"] = total_preprocess_time
+        
+        # 更新保存统计
+        if self.frame_saver:
+            saver_stats = self.frame_saver.get_stats()
+            self.stats["frames_saved"] = saver_stats.get("frames_saved", 0)
+            self.stats["masks_saved"] = saver_stats.get("masks_saved", 0)
 
         return frames_data
 
@@ -418,7 +466,8 @@ class VideoOCR:
             settings,
             device_info,
             frames_data,
-            self._frames_dir
+            self._frames_dir,
+            self._masks_dir
         )
 
         self.timer.stop("保存JSON")
@@ -501,7 +550,12 @@ class VideoOCR:
         log_and_save("\n输出文件:")
         if os.path.exists(video_path):
             video_size = os.path.getsize(video_path) / (1024 * 1024)
-            log_and_save(f"  ├─ 视频: {video_path} ({video_size:.1f} MB)")
+            log_and_save(f"  ├─ 标注视频: {video_path} ({video_size:.1f} MB)")
+        
+        # mask 视频
+        if self._output_mask_video_path and os.path.exists(self._output_mask_video_path):
+            mask_video_size = os.path.getsize(self._output_mask_video_path) / (1024 * 1024)
+            log_and_save(f"  ├─ Mask视频: {self._output_mask_video_path} ({mask_video_size:.1f} MB)")
 
         if os.path.exists(json_path):
             json_size = os.path.getsize(json_path) / 1024
@@ -511,11 +565,22 @@ class VideoOCR:
             log_and_save(f"  ├─ 统计: {self._output_txt_path}")
 
         if self.save_frames and self._frames_dir and os.path.exists(self._frames_dir):
-            frames_saved = self.frame_saver.frames_saved if self.frame_saver else 0
-            total_size = sum(os.path.getsize(os.path.join(self._frames_dir, f))
-                           for f in os.listdir(self._frames_dir) if os.path.isfile(os.path.join(self._frames_dir, f)))
+            frames_saved = self.stats.get("frames_saved", 0)
+            masks_saved = self.stats.get("masks_saved", 0)
+            
+            # 计算帧图片总大小
+            total_size = 0
+            for root, dirs, files in os.walk(self._frames_dir):
+                for f in files:
+                    filepath = os.path.join(root, f)
+                    if os.path.isfile(filepath):
+                        total_size += os.path.getsize(filepath)
             size_mb = total_size / (1024 * 1024)
-            log_and_save(f"  ├─ 帧图片: {self._frames_dir} ({frames_saved} 张, {size_mb:.1f} MB)")
+            
+            if masks_saved > 0:
+                log_and_save(f"  ├─ 帧图片: {self._frames_dir} ({frames_saved} 张标注帧 + {masks_saved} 张mask, {size_mb:.1f} MB)")
+            else:
+                log_and_save(f"  ├─ 帧图片: {self._frames_dir} ({frames_saved} 张, {size_mb:.1f} MB)")
 
         log_and_save(f"  └─ (完成)")
 
@@ -554,7 +619,7 @@ def main():
         "-s", "--style",
         choices=["red_hollow", "green_fill", "mask"],
         default="red_hollow",
-        help="标注框样式: red_hollow(红色空心框) / green_fill(绿色半透明填充) / mask(黑白遮罩)"
+        help="标注框样式: red_hollow(红色空心框+mask视频) / green_fill(绿色半透明填充+mask视频) / mask(仅黑白遮罩视频)"
     )
     parser.add_argument("-a", "--audio", action="store_true", help="保留原视频音频")
     parser.add_argument("--text-detection", action="store_true", help="使用TextDetection模式")
