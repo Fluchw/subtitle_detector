@@ -1,27 +1,36 @@
+cat > pyproject.toml << 'EOF'
 [project]
 name = "subtitle-detector"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11,<=3.13"
+requires-python = ">=3.12,<3.13"
 dependencies = [
-
-    "paddleocr>=3.0.0",
-    "opencv-python>=4.5.0,<4.11",
+    "paddleocr>=3.3.2",
+    "paddlex>=3.3.12",
+    "paddlepaddle-gpu>=3.2.0",
+    "opencv-contrib-python>=4.10.0",
+    "opencv-python>=4.10.0",
+    "huggingface-hub>=1.2.3",
     "numpy==1.26.4",
+    "pillow>=12.0.0",
+    "pandas>=2.3.3",
+    "modelscope>=1.33.0",
 ]
 
-# uv pip install paddlepaddle-gpu==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
-# python -m pip install paddlepaddle-gpu==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'"
+]
 
 [[tool.uv.index]]
- name = "paddlepaddle-gpu"
- url = "https://www.paddlepaddle.org.cn/packages/stable/cu118/"
- explicit = true
-
-[[tool.uv.index]]
-url = "https://mirrors.aliyun.com/pypi/simple/"
+name = "paddlepaddle"
+url = "https://www.paddlepaddle.org.cn/packages/stable/cu126/"
 explicit = true
+
+[tool.uv.sources]
+paddlepaddle-gpu = { index = "paddlepaddle" }
 
 [tool.uv.pip]
 index-url = "https://mirrors.aliyun.com/pypi/simple/"
+EOF
