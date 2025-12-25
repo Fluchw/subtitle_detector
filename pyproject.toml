@@ -1,4 +1,3 @@
-cat > pyproject.toml << 'EOF'
 [project]
 name = "subtitle-detector"
 version = "0.1.0"
@@ -33,4 +32,3 @@ paddlepaddle-gpu = { index = "paddlepaddle" }
 
 [tool.uv.pip]
 index-url = "https://mirrors.aliyun.com/pypi/simple/"
-EOF
