@@ -17,7 +17,7 @@ ocr = VideoOCR(
     keep_audio=False,              # 是否保留原视频音频
     verbose=True,                  # 是否输出详细日志
     # ===== 模型设置 =====
-    use_lightweight=True,          # True: Mobile轻量模型(快) / False: Server模型(精准)
+    use_lightweight=False,          # True: Mobile轻量模型(快) / False: Server模型(精准)
     detect_only=False,              # True: 仅检测位置(快) / False: 检测+识别文字
     # ===== 处理优化 =====
     skip_frames=0,                 # 跳帧: 0(逐帧) / N(每N+1帧处理1帧)

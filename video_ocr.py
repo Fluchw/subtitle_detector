@@ -40,7 +40,8 @@ class VideoOCR:
         enhance_mode: Optional[Literal["clahe", "binary", "both", "sharpen", "denoise", "denoise_sharpen"]] = None,
         use_orientation_classify: bool = False,
         use_textline_orientation: bool = False,
-        use_doc_unwarping: bool = False
+        use_doc_unwarping: bool = False,
+        interpolate_mode: Literal["linear", "union"] = "union"
     ):
         """
         初始化 VideoOCR
@@ -75,6 +76,9 @@ class VideoOCR:
             use_orientation_classify: 启用文档方向分类（检测整体旋转0°/90°/180°/270°）
             use_textline_orientation: 启用文本行方向检测（检测倾斜文字）
             use_doc_unwarping: 启用文档矫正（处理弯曲/透视变形）
+            interpolate_mode: 帧间补全模式
+                - "linear": 线性插值，取前后帧框坐标的中点
+                - "union": 并集模式，取前后帧框的最小外接矩形（默认，更保守）
         """
         self.box_style = box_style
         self.keep_audio = keep_audio
@@ -85,6 +89,7 @@ class VideoOCR:
         self.use_orientation_classify = use_orientation_classify
         self.use_textline_orientation = use_textline_orientation
         self.use_doc_unwarping = use_doc_unwarping
+        self.interpolate_mode = interpolate_mode
 
         # 未使用的参数（保留用于向后兼容）
         self.batch_size = batch_size
@@ -112,6 +117,11 @@ class VideoOCR:
         )
         self.renderer = FrameRenderer(box_style=box_style)
         self.frame_saver = None  # 稍后初始化
+        self.box_interpolator = BoxInterpolator(
+            iou_threshold=0.3, 
+            min_box_count_diff=1,
+            interpolate_mode=interpolate_mode
+        )
 
         # 设备信息和视频信息
         self.device_info = {}
@@ -122,6 +132,8 @@ class VideoOCR:
             "total_detections": 0,
             "frames_processed": 0,
             "frames_skipped": 0,
+            "frames_interpolated": 0,
+            "boxes_added": 0,
             "cache_hits": 0,
             "frames_saved": 0,
             "masks_saved": 0,
@@ -292,7 +304,14 @@ class VideoOCR:
         self.logger.info(f"开始处理，预计 {self.video_info.total_frames} 帧 ({', '.join(mode_info)})...")
 
     def _process_video(self, input_path: str, output_video_path: str) -> List[Dict]:
-        """处理视频（串行方式）"""
+        """
+        处理视频（带帧间补全）
+        
+        使用滑动窗口缓冲实现帧间补全：
+        1. 维护一个3帧的滑动窗口（prev, curr, next）
+        2. 当处理完next帧后，对curr帧进行补全检查
+        3. 补全后输出curr帧
+        """
         width = self.video_info.width
         height = self.video_info.height
         fps = self.video_info.fps
@@ -322,7 +341,6 @@ class VideoOCR:
             )
 
         frames_data = []
-        frame_id = 0
 
         if total_frames <= 0:
             total_frames = int(fps * 60)
@@ -330,69 +348,137 @@ class VideoOCR:
         process_start_time = time.time()
         total_preprocess_time = 0.0  # 累计图像预处理时间
 
+        # 滑动窗口缓冲：存储 (frame, boxes, detections, frame_id)
+        buffer = []  # 最多存储3帧
+        frame_id = 0
+        
         last_boxes = []
         last_detections = []
+
+        def process_single_frame(frame, fid):
+            """处理单帧，返回 (boxes, detections, preprocess_time)"""
+            nonlocal last_boxes, last_detections, total_preprocess_time
+            
+            timestamp = fid / fps
+            should_process = (self.skip_frames == 0) or (fid % (self.skip_frames + 1) == 0)
+            
+            if should_process:
+                boxes, detections, preprocess_time = self.ocr_engine.process_frame(frame)
+                total_preprocess_time += preprocess_time
+                last_boxes = boxes
+                last_detections = detections
+                skipped = False
+            else:
+                boxes = last_boxes
+                detections = last_detections
+                skipped = True
+                self.stats["frames_skipped"] += 1
+            
+            return boxes, detections, skipped
+        
+        def output_frame(frame, boxes, detections, fid, skipped):
+            """输出一帧到视频"""
+            timestamp = fid / fps
+            
+            # 更新统计（使用补全后的检测数量）
+            if not skipped:
+                self.stats["total_detections"] += len(detections)
+            
+            # 构造帧数据
+            frame_data = {
+                "frame_id": fid,
+                "timestamp": round(timestamp, 3),
+                "detections": detections
+            }
+            if skipped:
+                frame_data["skipped"] = True
+            
+            # 绘制标注框（返回标注帧和 mask）
+            result_frame, mask_frame = self.renderer.draw_boxes(frame, boxes)
+
+            # 保存帧图片和 mask
+            if self.frame_saver:
+                save_start = time.time()
+                self.frame_saver.save_frame(result_frame, fid, mask=mask_frame)
+                self.stats["frame_save_time"] += time.time() - save_start
+
+            # 写入主视频
+            self.video_processor.write_frame(write_process, result_frame)
+            
+            # 写入 mask 视频（如果需要）
+            if mask_write_process and mask_frame is not None:
+                self.video_processor.write_frame(mask_write_process, mask_frame)
+
+            frames_data.append(frame_data)
+            self.stats["frames_processed"] = fid + 1
+            
+            # 更新进度
+            self.logger.progress(fid + 1, total_frames, process_start_time)
 
         try:
             while True:
                 frame = self.video_processor.read_frame(read_process, width, height)
                 if frame is None:
                     break
-
-                timestamp = frame_id / fps
-
-                # 判断是否需要OCR处理
-                should_process = (self.skip_frames == 0) or (frame_id % (self.skip_frames + 1) == 0)
-
-                if should_process:
-                    # OCR处理（返回预处理耗时）
-                    boxes, detections, preprocess_time = self.ocr_engine.process_frame(frame)
-                    total_preprocess_time += preprocess_time
-
-                    last_boxes = boxes
-                    last_detections = detections
-                    self.stats["total_detections"] += len(detections)
-
-                    frame_data = {
-                        "frame_id": frame_id,
-                        "timestamp": round(timestamp, 3),
-                        "detections": detections
-                    }
-                else:
-                    # 使用上一帧的结果
-                    boxes = last_boxes
-                    detections = last_detections
-                    self.stats["frames_skipped"] += 1
-
-                    frame_data = {
-                        "frame_id": frame_id,
-                        "timestamp": round(timestamp, 3),
-                        "detections": detections,
-                        "skipped": True
-                    }
-
-                # 绘制标注框（返回标注帧和 mask）
-                result_frame, mask_frame = self.renderer.draw_boxes(frame, boxes)
-
-                # 保存帧图片和 mask
-                if self.frame_saver:
-                    save_start = time.time()
-                    self.frame_saver.save_frame(result_frame, frame_id, mask=mask_frame)
-                    self.stats["frame_save_time"] += time.time() - save_start
-
-                # 写入主视频
-                self.video_processor.write_frame(write_process, result_frame)
                 
-                # 写入 mask 视频（如果需要）
-                if mask_write_process and mask_frame is not None:
-                    self.video_processor.write_frame(mask_write_process, mask_frame)
-
-                frames_data.append(frame_data)
+                # 处理当前帧
+                boxes, detections, skipped = process_single_frame(frame, frame_id)
+                
+                # 添加到缓冲区
+                buffer.append({
+                    "frame": frame.copy(),
+                    "boxes": list(boxes),  # 复制列表
+                    "detections": list(detections),  # 复制列表
+                    "frame_id": frame_id,
+                    "skipped": skipped,
+                    "interpolated": False
+                })
+                
+                # 当缓冲区有3帧时，可以对中间帧进行补全并输出最旧的帧
+                if len(buffer) >= 3:
+                    prev_data = buffer[0]
+                    curr_data = buffer[1]
+                    next_data = buffer[2]
+                    
+                    # 尝试对中间帧（curr）进行补全
+                    if not curr_data["skipped"] and not curr_data["interpolated"]:
+                        new_boxes, new_detections, was_interpolated = self.box_interpolator.interpolate_frame(
+                            prev_data["boxes"],
+                            curr_data["boxes"],
+                            next_data["boxes"],
+                            prev_data["detections"],
+                            curr_data["detections"],
+                            next_data["detections"]
+                        )
+                        if was_interpolated:
+                            curr_data["boxes"] = new_boxes
+                            curr_data["detections"] = new_detections
+                            curr_data["interpolated"] = True
+                    
+                    # 输出最旧的帧（prev）
+                    output_frame(
+                        prev_data["frame"],
+                        prev_data["boxes"],
+                        prev_data["detections"],
+                        prev_data["frame_id"],
+                        prev_data["skipped"]
+                    )
+                    
+                    # 移除已输出的帧
+                    buffer.pop(0)
+                
                 frame_id += 1
-                self.stats["frames_processed"] = frame_id
-
-                # 更新进度
-                self.logger.progress(frame_id, total_frames, process_start_time)
+            
+            # 处理缓冲区中剩余的帧（最多2帧）
+            # 这些帧没有"后一帧"可以用来补全，所以直接输出
+            for remaining_data in buffer:
+                output_frame(
+                    remaining_data["frame"],
+                    remaining_data["boxes"],
+                    remaining_data["detections"],
+                    remaining_data["frame_id"],
+                    remaining_data["skipped"]
+                )
 
         finally:
             read_process.stdout.close()
@@ -412,6 +498,11 @@ class VideoOCR:
             saver_stats = self.frame_saver.get_stats()
             self.stats["frames_saved"] = saver_stats.get("frames_saved", 0)
             self.stats["masks_saved"] = saver_stats.get("masks_saved", 0)
+        
+        # 更新帧间补全统计
+        interpolator_stats = self.box_interpolator.get_stats()
+        self.stats["frames_interpolated"] = interpolator_stats.get("frames_interpolated", 0)
+        self.stats["boxes_added"] = interpolator_stats.get("boxes_added", 0)
 
         return frames_data
 
@@ -593,6 +684,11 @@ class VideoOCR:
             log_and_save(f"  ├─ 跳过帧数: {self.stats['frames_skipped']}")
 
         log_and_save(f"  ├─ 检测文字区域: {self.stats['total_detections']} 个")
+        
+        # 帧间补全统计
+        if self.stats.get('frames_interpolated', 0) > 0:
+            log_and_save(f"  ├─ 帧间补全: {self.stats['frames_interpolated']} 帧补全了 {self.stats['boxes_added']} 个框")
+        
         avg = self.stats['total_detections'] / self.stats['frames_processed'] if self.stats['frames_processed'] > 0 else 0
         log_and_save(f"  └─ 平均每帧: {avg:.1f} 个")
 
@@ -649,6 +745,13 @@ def main():
                         help="启用文本行方向检测（检测倾斜文字）")
     parser.add_argument("--doc-unwarping", action="store_true", 
                         help="启用文档矫正（处理弯曲/透视变形）")
+    # 帧间补全参数
+    parser.add_argument(
+        "--interpolate-mode",
+        choices=["linear", "union"],
+        default="union",
+        help="帧间补全模式: linear(线性插值,取中点) / union(并集,取外接矩形,默认)"
+    )
 
     args = parser.parse_args()
 
@@ -671,7 +774,8 @@ def main():
         enhance_mode=args.enhance_mode,
         use_orientation_classify=args.orientation_classify,
         use_textline_orientation=args.textline_orientation,
-        use_doc_unwarping=args.doc_unwarping
+        use_doc_unwarping=args.doc_unwarping,
+        interpolate_mode=args.interpolate_mode
     )
 
     ocr.process(

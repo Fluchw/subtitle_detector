@@ -7,7 +7,7 @@ VideoOCR Core Modules
 from .frame_renderer import FrameRenderer, FrameSaver
 from .ocr_engine import ImageEnhancer, OCREngine
 from .result_exporter import ResultExporter
-from .utils import DeviceInfo, Logger, Timer
+from .utils import DeviceInfo, Logger, Timer, BoxInterpolator
 from .video_processor import VideoInfo, VideoProcessor, get_ffmpeg_path
 
 __all__ = [
@@ -21,5 +21,6 @@ __all__ = [
     "ResultExporter",
     "Logger",
     "Timer",
-    "DeviceInfo"
+    "DeviceInfo",
+    "BoxInterpolator"
 ]
